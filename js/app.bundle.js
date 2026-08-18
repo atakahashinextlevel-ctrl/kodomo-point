@@ -1,5 +1,5 @@
 /**
- * app.bundle.js - 絵文字大幅拡張 ＆ 初回あいことば強制入力 ＆ 家族リアルタイム同期
+ * app.bundle.js - インターネット越しの完全リアルタイム同期エンジン (WebSocket & Cloud Cache)
  */
 
 // =========================================
@@ -239,9 +239,9 @@ class ConfettiEngine {
 const confetti = new ConfettiEngine('confetti-canvas');
 
 // =========================================
-// 3. 状態管理 ＆ リアルタイム同期エンジン
+// 3. クラウド同期エンジン (WebSocket & HTTP Pub/Sub)
 // =========================================
-const STORAGE_KEY_DATA = 'kodomo_point_app_state_v3';
+const STORAGE_KEY_DATA = 'kodomo_point_app_state_v4';
 const STORAGE_KEY_PASSCODE = 'kodomo_point_family_passcode_v1';
 
 const DEFAULT_ACTIONS = [
@@ -277,37 +277,42 @@ const DEFAULT_ACTIONS = [
   }
 ];
 
-class RealtimeStateStore {
+class InternetRealtimeStore {
   constructor() {
+    this.clientId = 'client_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
     this.passcode = localStorage.getItem(STORAGE_KEY_PASSCODE) || '';
     this.state = this.loadLocalState();
     this.listeners = [];
+    this.ws = null;
+    this.wsReconnectTimer = null;
     this.isCloudConnected = false;
-    this.broadcastChannel = null;
+    this.lastUpdatedAt = 0;
 
+    // ローカルタブ間同期
     try {
-      this.broadcastChannel = new BroadcastChannel('kodomo_point_sync_channel');
+      this.broadcastChannel = new BroadcastChannel('kodomo_point_local_channel');
       this.broadcastChannel.onmessage = (event) => {
-        if (event.data && event.data.type === 'STATE_UPDATE' && event.data.passcode === this.passcode) {
-          this.applyExternalState(event.data.state);
+        if (event.data && event.data.type === 'SYNC' && event.data.from !== this.clientId) {
+          this.applyExternalState(event.data.state, event.data.updatedAt, false);
         }
       };
-    } catch (e) {
-      console.warn('BroadcastChannel not supported:', e);
+    } catch (e) {}
+
+    if (this.passcode) {
+      this.connectCloud(this.passcode);
     }
+  }
 
-    window.addEventListener('storage', (e) => {
-      if (e.key === STORAGE_KEY_DATA) {
-        try {
-          const newState = JSON.parse(e.newValue);
-          if (newState && Array.isArray(newState.actions)) {
-            this.applyExternalState(newState);
-          }
-        } catch (err) {}
-      }
-    });
-
-    this.initCloud();
+  // トピック名のハッシュ化（英数字の安全な名前に変換）
+  getTopicName(passcode) {
+    let hash = 0;
+    const str = 'kpoint_' + (passcode || '').trim();
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash) + str.charCodeAt(i);
+      hash |= 0;
+    }
+    const safeStr = encodeURIComponent(passcode).replace(/[^a-zA-Z0-9]/g, '_');
+    return `kodomo_pt_${safeStr}_${Math.abs(hash)}`;
   }
 
   loadLocalState() {
@@ -316,6 +321,7 @@ class RealtimeStateStore {
       if (data) {
         const parsed = JSON.parse(data);
         if (Array.isArray(parsed.actions) && parsed.actions.length > 0) {
+          this.lastUpdatedAt = parsed.updatedAt || Date.now();
           return {
             actions: parsed.actions,
             history: Array.isArray(parsed.history) ? parsed.history : []
@@ -330,40 +336,177 @@ class RealtimeStateStore {
   }
 
   setPasscode(newPasscode) {
-    this.passcode = (newPasscode || '').trim();
-    localStorage.setItem(STORAGE_KEY_PASSCODE, this.passcode);
-    this.initCloud();
-    this.notify();
+    const trimmed = (newPasscode || '').trim();
+    if (this.passcode !== trimmed) {
+      this.passcode = trimmed;
+      localStorage.setItem(STORAGE_KEY_PASSCODE, this.passcode);
+      this.connectCloud(this.passcode);
+      this.notify();
+    }
   }
 
   getPasscode() {
     return this.passcode;
   }
 
-  initCloud() {
-    this.isCloudConnected = Boolean(this.passcode);
+  // --- クラウド接続 ＆ WebSocket リスナー ---
+  connectCloud(passcode) {
+    if (this.ws) {
+      try { this.ws.close(); } catch (e) {}
+      this.ws = null;
+    }
+    if (this.wsReconnectTimer) {
+      clearTimeout(this.wsReconnectTimer);
+      this.wsReconnectTimer = null;
+    }
+
+    if (!passcode) {
+      this.isCloudConnected = false;
+      this.notify();
+      return;
+    }
+
+    const topic = this.getTopicName(passcode);
+
+    // 1. クラウド上の最新データを即時取得（キャッシュポーリング）
+    this.fetchCloudInitialState(topic);
+
+    // 2. リアルタイムWebSocket接続の確立
+    const wsUrl = `wss://ntfy.sh/${topic}/ws`;
+    try {
+      this.ws = new WebSocket(wsUrl);
+
+      this.ws.onopen = () => {
+        this.isCloudConnected = true;
+        this.notify();
+      };
+
+      this.ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg && msg.event === 'message' && msg.message) {
+            const payload = JSON.parse(msg.message);
+            if (payload && payload.type === 'SYNC' && payload.from !== this.clientId) {
+              this.applyExternalState(payload.state, payload.updatedAt, false);
+            }
+          }
+        } catch (err) {}
+      };
+
+      this.ws.onclose = () => {
+        this.isCloudConnected = false;
+        this.notify();
+        // 自動再接続
+        this.wsReconnectTimer = setTimeout(() => {
+          if (this.passcode === passcode) {
+            this.connectCloud(passcode);
+          }
+        }, 3000);
+      };
+
+      this.ws.onerror = () => {
+        this.isCloudConnected = false;
+        this.notify();
+      };
+    } catch (e) {
+      console.warn('WebSocket init error:', e);
+    }
   }
 
-  applyExternalState(newState) {
-    this.state = newState;
-    localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(this.state));
+  // クラウド初期データ読み込み
+  async fetchCloudInitialState(topic) {
+    try {
+      const res = await fetch(`https://ntfy.sh/${topic}/json?poll=1&since=24h`);
+      if (res.ok) {
+        const text = await res.text();
+        const lines = text.trim().split('\n');
+        let latestPayload = null;
+
+        for (let i = lines.length - 1; i >= 0; i--) {
+          if (!lines[i]) continue;
+          try {
+            const item = JSON.parse(lines[i]);
+            if (item && item.message) {
+              const p = JSON.parse(item.message);
+              if (p && p.type === 'SYNC' && (!latestPayload || p.updatedAt > latestPayload.updatedAt)) {
+                latestPayload = p;
+              }
+            }
+          } catch (e) {}
+        }
+
+        if (latestPayload) {
+          this.applyExternalState(latestPayload.state, latestPayload.updatedAt, false);
+        } else {
+          // クラウドにまだデータがない場合は、この端末の現在の設定をクラウドにアップロード
+          this.broadcastState(true);
+        }
+      }
+    } catch (e) {
+      console.warn('Fetch cloud initial state failed:', e);
+    }
+  }
+
+  applyExternalState(newState, updatedAt, shouldSound = true) {
+    if (!newState || !Array.isArray(newState.actions)) return;
+    
+    // 現在より新しいか、初回適用の場合に更新
+    this.state = {
+      actions: newState.actions,
+      history: Array.isArray(newState.history) ? newState.history : []
+    };
+    this.lastUpdatedAt = updatedAt || Date.now();
+
+    try {
+      localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify({
+        ...this.state,
+        updatedAt: this.lastUpdatedAt
+      }));
+    } catch (e) {}
+
+    if (shouldSound) {
+      sound.playTap();
+    }
     this.notify();
   }
 
   saveState() {
+    this.lastUpdatedAt = Date.now();
     try {
-      localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(this.state));
-      if (this.broadcastChannel) {
-        this.broadcastChannel.postMessage({
-          type: 'STATE_UPDATE',
-          passcode: this.passcode,
-          state: this.state
-        });
-      }
-    } catch (e) {
-      console.warn('Save error:', e);
-    }
+      localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify({
+        ...this.state,
+        updatedAt: this.lastUpdatedAt
+      }));
+    } catch (e) {}
+
+    this.broadcastState();
     this.notify();
+  }
+
+  // クラウド ＆ ローカルタブへ送信
+  broadcastState(isInitial = false) {
+    const payload = {
+      type: 'SYNC',
+      from: this.clientId,
+      updatedAt: this.lastUpdatedAt,
+      isInitial: isInitial,
+      state: this.state
+    };
+
+    // ローカル他タブ
+    if (this.broadcastChannel) {
+      this.broadcastChannel.postMessage(payload);
+    }
+
+    // インターネット経由のクラウド送信 (ntfy.sh HTTP POST)
+    if (this.passcode) {
+      const topic = this.getTopicName(this.passcode);
+      fetch(`https://ntfy.sh/${topic}`, {
+        method: 'POST',
+        headers: { 'Title': 'Sync', 'Priority': '1' },
+        body: JSON.stringify(payload)
+      }).catch(err => console.warn('Cloud sync post error:', err));
+    }
   }
 
   subscribe(listener) {
@@ -471,10 +614,10 @@ class RealtimeStateStore {
   }
 }
 
-const store = new RealtimeStateStore();
+const store = new InternetRealtimeStore();
 
 // =========================================
-// 4. メインUIコントローラー（絵文字大幅拡張）
+// 4. メインUIコントローラー
 // =========================================
 const EMOJI_CATEGORIES = [
   {
@@ -521,24 +664,20 @@ class App {
   }
 
   cacheDom() {
-    // Views
     this.welcomeView = document.getElementById('welcome-view');
     this.childView = document.getElementById('child-view');
     this.settingsView = document.getElementById('settings-view');
 
-    // Welcome view
     this.inputWelcomePasscode = document.getElementById('input-welcome-passcode');
     this.btnWelcomeStart = document.getElementById('btn-welcome-start');
     this.btnWelcomeSkip = document.getElementById('btn-welcome-skip');
 
-    // Child view
     this.btnToSettings = document.getElementById('btn-to-settings');
     this.childFamilyLabel = document.getElementById('child-family-label');
     this.childSyncDot = document.getElementById('child-sync-dot');
     this.actionButtonsGrid = document.getElementById('action-buttons-grid');
     this.btnUndo = document.getElementById('btn-undo');
 
-    // Settings view
     this.btnBackToChild = document.getElementById('btn-back-to-child');
     this.inputSettingsPasscode = document.getElementById('input-settings-passcode');
     this.btnSavePasscode = document.getElementById('btn-save-passcode');
@@ -548,7 +687,6 @@ class App {
     this.actionSettingsList = document.getElementById('action-settings-list');
     this.btnResetAll = document.getElementById('btn-reset-all');
 
-    // Modal Edit
     this.modalEditAction = document.getElementById('modal-edit-action');
     this.modalTitle = document.getElementById('modal-title');
     this.editActionTitle = document.getElementById('edit-action-title');
@@ -565,7 +703,6 @@ class App {
     this.presetEmojisList = document.getElementById('preset-emojis-list');
     this.colorPaletteList = document.getElementById('color-palette-list');
 
-    // Preview
     this.actionPreviewCard = document.getElementById('action-preview-card');
     this.previewEmoji = document.getElementById('preview-emoji');
     this.previewTitle = document.getElementById('preview-title');
@@ -576,7 +713,6 @@ class App {
     this.btnCancelEdit = document.getElementById('btn-cancel-edit');
     this.btnSaveEdit = document.getElementById('btn-save-edit');
 
-    // Celebration
     this.modalCelebration = document.getElementById('modal-celebration');
     this.celebrationActionTitle = document.getElementById('celebration-action-title');
     this.celebrationRewardName = document.getElementById('celebration-reward-name');
@@ -683,7 +819,6 @@ class App {
     this.editActionTitle.addEventListener('input', () => this.updateEditPreview());
     this.editActionReward.addEventListener('input', () => this.updateEditPreview());
 
-    // 絵文字直接入力対応
     this.editActionEmoji.addEventListener('input', () => {
       this.editingEmoji = this.editActionEmoji.value || '⭐';
       this.updateEditModalChoices();
@@ -759,7 +894,7 @@ class App {
     if (passcode) {
       this.childFamilyLabel.textContent = `あいことば: ${passcode}`;
       this.childSyncDot.className = 'sync-dot connected';
-      this.childSyncDot.title = '家族とリアルタイム同期中';
+      this.childSyncDot.title = '家族とインターネット同期中（接続済み）';
     } else {
       this.childFamilyLabel.textContent = '同期なし（一人で利用中）';
       this.childSyncDot.className = 'sync-dot';
@@ -856,7 +991,6 @@ class App {
     });
   }
 
-  // --- 絵文字パレットの構築（カテゴリ別に大幅拡張） ---
   renderEditModalPickers() {
     this.editPointOptions.innerHTML = '';
     POINT_OPTIONS.forEach(pts => {
@@ -873,7 +1007,6 @@ class App {
       this.editPointOptions.appendChild(btn);
     });
 
-    // カテゴリ別絵文字パレット
     this.presetEmojisList.innerHTML = '';
     EMOJI_CATEGORIES.forEach(cat => {
       const catBox = document.createElement('div');
