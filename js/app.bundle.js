@@ -1,5 +1,5 @@
 /**
- * app.bundle.js - インターネット越しの完全リアルタイム同期エンジン (WebSocket & Cloud Cache)
+ * app.bundle.js - 超堅牢ハイブリッド同期エンジン (WebSocket + 定期ポーリング + キャッシュ同期)
  */
 
 // =========================================
@@ -8,7 +8,6 @@
 class SoundEngine {
   constructor() {
     this.ctx = null;
-    this.isMuted = false;
   }
 
   init() {
@@ -25,7 +24,7 @@ class SoundEngine {
 
   playTap() {
     this.init();
-    if (!this.ctx || this.isMuted) return;
+    if (!this.ctx) return;
     try {
       const now = this.ctx.currentTime;
       const osc = this.ctx.createOscillator();
@@ -43,14 +42,12 @@ class SoundEngine {
 
       osc.start(now);
       osc.stop(now + 0.15);
-    } catch (e) {
-      console.warn('Audio error:', e);
-    }
+    } catch (e) {}
   }
 
   playUndo() {
     this.init();
-    if (!this.ctx || this.isMuted) return;
+    if (!this.ctx) return;
     try {
       const now = this.ctx.currentTime;
       const osc = this.ctx.createOscillator();
@@ -68,14 +65,12 @@ class SoundEngine {
 
       osc.start(now);
       osc.stop(now + 0.18);
-    } catch (e) {
-      console.warn('Audio error:', e);
-    }
+    } catch (e) {}
   }
 
   playFanfare() {
     this.init();
-    if (!this.ctx || this.isMuted) return;
+    if (!this.ctx) return;
     try {
       const now = this.ctx.currentTime;
       const notes = [
@@ -101,14 +96,12 @@ class SoundEngine {
         osc.start(now + n.time);
         osc.stop(now + n.time + n.dur);
       });
-    } catch (e) {
-      console.warn('Audio error:', e);
-    }
+    } catch (e) {}
   }
 
   playReset() {
     this.init();
-    if (!this.ctx || this.isMuted) return;
+    if (!this.ctx) return;
     try {
       const now = this.ctx.currentTime;
       const osc = this.ctx.createOscillator();
@@ -126,9 +119,7 @@ class SoundEngine {
 
       osc.start(now);
       osc.stop(now + 0.2);
-    } catch (e) {
-      console.warn('Audio error:', e);
-    }
+    } catch (e) {}
   }
 }
 
@@ -239,10 +230,10 @@ class ConfettiEngine {
 const confetti = new ConfettiEngine('confetti-canvas');
 
 // =========================================
-// 3. クラウド同期エンジン (WebSocket & HTTP Pub/Sub)
+// 3. ハイブリッド同期ストア (WebSocket + Polling + LocalStorage)
 // =========================================
-const STORAGE_KEY_DATA = 'kodomo_point_app_state_v4';
-const STORAGE_KEY_PASSCODE = 'kodomo_point_family_passcode_v1';
+const STORAGE_KEY_DATA = 'kodomo_point_state_v5';
+const STORAGE_KEY_PASSCODE = 'kodomo_point_passcode_v5';
 
 const DEFAULT_ACTIONS = [
   {
@@ -277,54 +268,53 @@ const DEFAULT_ACTIONS = [
   }
 ];
 
-class InternetRealtimeStore {
+class HybridRealtimeStore {
   constructor() {
-    this.clientId = 'client_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+    this.clientId = 'cid_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
     this.passcode = localStorage.getItem(STORAGE_KEY_PASSCODE) || '';
-    this.state = this.loadLocalState();
+    this.state = this.loadLocal();
     this.listeners = [];
     this.ws = null;
-    this.wsReconnectTimer = null;
-    this.isCloudConnected = false;
-    this.lastUpdatedAt = 0;
+    this.isCloudSyncing = false;
+    this.lastUpdatedAt = Number(localStorage.getItem('kodomo_point_last_updated') || 0);
+    this.pollInterval = null;
 
-    // ローカルタブ間同期
+    // タブ間同期
     try {
-      this.broadcastChannel = new BroadcastChannel('kodomo_point_local_channel');
-      this.broadcastChannel.onmessage = (event) => {
-        if (event.data && event.data.type === 'SYNC' && event.data.from !== this.clientId) {
-          this.applyExternalState(event.data.state, event.data.updatedAt, false);
+      this.channel = new BroadcastChannel('kodomo_pt_channel_v5');
+      this.channel.onmessage = (e) => {
+        if (e.data && e.data.from !== this.clientId && e.data.passcode === this.passcode) {
+          this.applyExternal(e.data.state, e.data.updatedAt, true);
         }
       };
     } catch (e) {}
 
     if (this.passcode) {
-      this.connectCloud(this.passcode);
+      this.startSync(this.passcode);
     }
   }
 
-  // トピック名のハッシュ化（英数字の安全な名前に変換）
-  getTopicName(passcode) {
-    let hash = 0;
-    const str = 'kpoint_' + (passcode || '').trim();
-    for (let i = 0; i < str.length; i++) {
-      hash = ((hash << 5) - hash) + str.charCodeAt(i);
-      hash |= 0;
+  // 安全なトピック文字列の生成
+  toTopic(passcode) {
+    const raw = (passcode || '').trim().toLowerCase();
+    let hash = 5381;
+    for (let i = 0; i < raw.length; i++) {
+      hash = ((hash << 5) + hash) + raw.charCodeAt(i);
+      hash = hash & hash;
     }
-    const safeStr = encodeURIComponent(passcode).replace(/[^a-zA-Z0-9]/g, '_');
-    return `kodomo_pt_${safeStr}_${Math.abs(hash)}`;
+    const clean = encodeURIComponent(raw).replace(/[^a-zA-Z0-9]/g, '');
+    return `kpoint_${clean}_${Math.abs(hash)}`;
   }
 
-  loadLocalState() {
+  loadLocal() {
     try {
-      const data = localStorage.getItem(STORAGE_KEY_DATA);
-      if (data) {
-        const parsed = JSON.parse(data);
-        if (Array.isArray(parsed.actions) && parsed.actions.length > 0) {
-          this.lastUpdatedAt = parsed.updatedAt || Date.now();
+      const d = localStorage.getItem(STORAGE_KEY_DATA);
+      if (d) {
+        const p = JSON.parse(d);
+        if (Array.isArray(p.actions) && p.actions.length > 0) {
           return {
-            actions: parsed.actions,
-            history: Array.isArray(parsed.history) ? parsed.history : []
+            actions: p.actions,
+            history: Array.isArray(p.history) ? p.history : []
           };
         }
       }
@@ -335,92 +325,86 @@ class InternetRealtimeStore {
     };
   }
 
-  setPasscode(newPasscode) {
-    const trimmed = (newPasscode || '').trim();
-    if (this.passcode !== trimmed) {
-      this.passcode = trimmed;
-      localStorage.setItem(STORAGE_KEY_PASSCODE, this.passcode);
-      this.connectCloud(this.passcode);
-      this.notify();
-    }
+  setPasscode(code) {
+    const trimmed = (code || '').trim();
+    this.passcode = trimmed;
+    localStorage.setItem(STORAGE_KEY_PASSCODE, this.passcode);
+    this.startSync(this.passcode);
+    this.notify();
   }
 
   getPasscode() {
     return this.passcode;
   }
 
-  // --- クラウド接続 ＆ WebSocket リスナー ---
-  connectCloud(passcode) {
+  // 同期プロトコルの開始
+  startSync(passcode) {
     if (this.ws) {
       try { this.ws.close(); } catch (e) {}
       this.ws = null;
     }
-    if (this.wsReconnectTimer) {
-      clearTimeout(this.wsReconnectTimer);
-      this.wsReconnectTimer = null;
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
     }
 
     if (!passcode) {
-      this.isCloudConnected = false;
+      this.isCloudSyncing = false;
       this.notify();
       return;
     }
 
-    const topic = this.getTopicName(passcode);
+    const topic = this.toTopic(passcode);
 
-    // 1. クラウド上の最新データを即時取得（キャッシュポーリング）
-    this.fetchCloudInitialState(topic);
+    // 1. 初回クラウド状態フェッチ
+    this.pollCloud(topic, true);
 
-    // 2. リアルタイムWebSocket接続の確立
-    const wsUrl = `wss://ntfy.sh/${topic}/ws`;
+    // 2. 定期ポーリング（3秒おき：WebSocketが途切れても確実に同期）
+    this.pollInterval = setInterval(() => {
+      this.pollCloud(topic, false);
+    }, 3000);
+
+    // 3. WebSocket接続（0.1秒リアルタイム通知）
     try {
-      this.ws = new WebSocket(wsUrl);
-
+      this.ws = new WebSocket(`wss://ntfy.sh/${topic}/ws`);
       this.ws.onopen = () => {
-        this.isCloudConnected = true;
+        this.isCloudSyncing = true;
         this.notify();
       };
-
       this.ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
           if (msg && msg.event === 'message' && msg.message) {
-            const payload = JSON.parse(msg.message);
-            if (payload && payload.type === 'SYNC' && payload.from !== this.clientId) {
-              this.applyExternalState(payload.state, payload.updatedAt, false);
+            const data = JSON.parse(msg.message);
+            if (data && data.type === 'SYNC' && data.from !== this.clientId) {
+              this.applyExternal(data.state, data.updatedAt, true);
             }
           }
-        } catch (err) {}
+        } catch (e) {}
       };
-
       this.ws.onclose = () => {
-        this.isCloudConnected = false;
+        this.isCloudSyncing = false;
         this.notify();
-        // 自動再接続
-        this.wsReconnectTimer = setTimeout(() => {
-          if (this.passcode === passcode) {
-            this.connectCloud(passcode);
-          }
-        }, 3000);
       };
-
       this.ws.onerror = () => {
-        this.isCloudConnected = false;
+        this.isCloudSyncing = false;
         this.notify();
       };
     } catch (e) {
-      console.warn('WebSocket init error:', e);
+      console.warn('WS error:', e);
     }
   }
 
-  // クラウド初期データ読み込み
-  async fetchCloudInitialState(topic) {
+  // クラウドからのポーリング取得
+  async pollCloud(topic, isInitial = false) {
     try {
-      const res = await fetch(`https://ntfy.sh/${topic}/json?poll=1&since=24h`);
+      const url = `https://ntfy.sh/${topic}/json?poll=1&since=24h`;
+      const res = await fetch(url);
       if (res.ok) {
+        this.isCloudSyncing = true;
         const text = await res.text();
         const lines = text.trim().split('\n');
-        let latestPayload = null;
+        let latest = null;
 
         for (let i = lines.length - 1; i >= 0; i--) {
           if (!lines[i]) continue;
@@ -428,29 +412,31 @@ class InternetRealtimeStore {
             const item = JSON.parse(lines[i]);
             if (item && item.message) {
               const p = JSON.parse(item.message);
-              if (p && p.type === 'SYNC' && (!latestPayload || p.updatedAt > latestPayload.updatedAt)) {
-                latestPayload = p;
+              if (p && p.type === 'SYNC' && (!latest || p.updatedAt > latest.updatedAt)) {
+                latest = p;
               }
             }
-          } catch (e) {}
+          } catch (err) {}
         }
 
-        if (latestPayload) {
-          this.applyExternalState(latestPayload.state, latestPayload.updatedAt, false);
-        } else {
-          // クラウドにまだデータがない場合は、この端末の現在の設定をクラウドにアップロード
-          this.broadcastState(true);
+        if (latest && latest.updatedAt > this.lastUpdatedAt) {
+          this.applyExternal(latest.state, latest.updatedAt, !isInitial);
+        } else if (isInitial && !latest) {
+          // クラウドにデータがまだ存在しない場合、自分の端末のデータをクラウドの初期データとして登録
+          this.broadcast(true);
         }
       }
     } catch (e) {
-      console.warn('Fetch cloud initial state failed:', e);
+      // オフラインまたはエラー
+      this.isCloudSyncing = false;
     }
+    this.notify();
   }
 
-  applyExternalState(newState, updatedAt, shouldSound = true) {
+  applyExternal(newState, updatedAt, playEffect = true) {
     if (!newState || !Array.isArray(newState.actions)) return;
-    
-    // 現在より新しいか、初回適用の場合に更新
+    if (updatedAt && updatedAt <= this.lastUpdatedAt) return;
+
     this.state = {
       actions: newState.actions,
       history: Array.isArray(newState.history) ? newState.history : []
@@ -458,61 +444,58 @@ class InternetRealtimeStore {
     this.lastUpdatedAt = updatedAt || Date.now();
 
     try {
-      localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify({
-        ...this.state,
-        updatedAt: this.lastUpdatedAt
-      }));
+      localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(this.state));
+      localStorage.setItem('kodomo_point_last_updated', String(this.lastUpdatedAt));
     } catch (e) {}
 
-    if (shouldSound) {
+    if (playEffect) {
       sound.playTap();
     }
     this.notify();
   }
 
-  saveState() {
+  save() {
     this.lastUpdatedAt = Date.now();
     try {
-      localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify({
-        ...this.state,
-        updatedAt: this.lastUpdatedAt
-      }));
+      localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(this.state));
+      localStorage.setItem('kodomo_point_last_updated', String(this.lastUpdatedAt));
     } catch (e) {}
 
-    this.broadcastState();
+    this.broadcast();
     this.notify();
   }
 
-  // クラウド ＆ ローカルタブへ送信
-  broadcastState(isInitial = false) {
+  // クラウドと他タブへデータ送信
+  broadcast(isInitial = false) {
     const payload = {
       type: 'SYNC',
       from: this.clientId,
+      passcode: this.passcode,
       updatedAt: this.lastUpdatedAt,
       isInitial: isInitial,
       state: this.state
     };
 
-    // ローカル他タブ
-    if (this.broadcastChannel) {
-      this.broadcastChannel.postMessage(payload);
+    // タブ間
+    if (this.channel) {
+      try { this.channel.postMessage(payload); } catch (e) {}
     }
 
-    // インターネット経由のクラウド送信 (ntfy.sh HTTP POST)
+    // クラウド送信
     if (this.passcode) {
-      const topic = this.getTopicName(this.passcode);
+      const topic = this.toTopic(this.passcode);
       fetch(`https://ntfy.sh/${topic}`, {
         method: 'POST',
         headers: { 'Title': 'Sync', 'Priority': '1' },
         body: JSON.stringify(payload)
-      }).catch(err => console.warn('Cloud sync post error:', err));
+      }).catch(() => {});
     }
   }
 
-  subscribe(listener) {
-    this.listeners.push(listener);
+  subscribe(fn) {
+    this.listeners.push(fn);
     return () => {
-      this.listeners = this.listeners.filter(l => l !== listener);
+      this.listeners = this.listeners.filter(l => l !== fn);
     };
   }
 
@@ -528,18 +511,18 @@ class InternetRealtimeStore {
     const action = this.state.actions.find(a => a.id === actionId);
     if (!action) return null;
 
-    const pointsToAdd = action.points || 1;
-    action.currentPoints += pointsToAdd;
+    const pts = action.points || 1;
+    action.currentPoints += pts;
 
     this.state.history.push({
       actionId: action.id,
-      pointsAdded: pointsToAdd,
+      pointsAdded: pts,
       timestamp: Date.now()
     });
 
     const achieved = action.currentPoints >= action.targetPoints;
-    this.saveState();
-    return { achieved, action, pointsAdded: pointsToAdd };
+    this.save();
+    return { achieved, action, pointsAdded: pts };
   }
 
   undoLastAction() {
@@ -551,7 +534,7 @@ class InternetRealtimeStore {
       action.currentPoints = Math.max(0, action.currentPoints - last.pointsAdded);
     }
 
-    this.saveState();
+    this.save();
     return last;
   }
 
@@ -560,7 +543,7 @@ class InternetRealtimeStore {
     if (action) {
       action.currentPoints = 0;
       this.state.history = this.state.history.filter(h => h.actionId !== actionId);
-      this.saveState();
+      this.save();
     }
   }
 
@@ -569,7 +552,7 @@ class InternetRealtimeStore {
       a.currentPoints = 0;
     });
     this.state.history = [];
-    this.saveState();
+    this.save();
   }
 
   saveAction(actionData) {
@@ -598,7 +581,7 @@ class InternetRealtimeStore {
       };
       this.state.actions.push(newAction);
     }
-    this.saveState();
+    this.save();
     return true;
   }
 
@@ -609,12 +592,12 @@ class InternetRealtimeStore {
     }
     this.state.actions = this.state.actions.filter(a => a.id !== actionId);
     this.state.history = this.state.history.filter(h => h.actionId !== actionId);
-    this.saveState();
+    this.save();
     return true;
   }
 }
 
-const store = new InternetRealtimeStore();
+const store = new HybridRealtimeStore();
 
 // =========================================
 // 4. メインUIコントローラー
@@ -893,8 +876,13 @@ class App {
 
     if (passcode) {
       this.childFamilyLabel.textContent = `あいことば: ${passcode}`;
-      this.childSyncDot.className = 'sync-dot connected';
-      this.childSyncDot.title = '家族とインターネット同期中（接続済み）';
+      if (store.isCloudSyncing) {
+        this.childSyncDot.className = 'sync-dot connected';
+        this.childSyncDot.title = '家族とリアルタイム同期中（クラウド接続済）';
+      } else {
+        this.childSyncDot.className = 'sync-dot';
+        this.childSyncDot.title = 'クラウド接続待機中...';
+      }
     } else {
       this.childFamilyLabel.textContent = '同期なし（一人で利用中）';
       this.childSyncDot.className = 'sync-dot';
