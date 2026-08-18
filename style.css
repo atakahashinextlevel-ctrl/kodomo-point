@@ -237,11 +237,40 @@ body {
   50% { opacity: 0.5; }
 }
 
-.child-sub-message {
-  font-size: 0.9rem;
-  font-weight: bold;
-  color: #8C6A43;
-  padding-left: 2px;
+.header-btns-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sync-refresh-btn {
+  background: #E8F5E9;
+  border: 1.5px solid #81C784;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.82rem;
+  font-weight: 900;
+  color: #2E7D32;
+  cursor: pointer;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
+  transition: transform 0.1s, background-color 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sync-refresh-btn:active {
+  transform: scale(0.92);
+  background: #C8E6C9;
+}
+
+.sync-refresh-btn.spinning {
+  animation: spinIcon 0.6s ease-in-out;
+}
+
+@keyframes spinIcon {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 
 .settings-gear-btn {

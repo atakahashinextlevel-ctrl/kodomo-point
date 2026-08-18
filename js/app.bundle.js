@@ -656,6 +656,7 @@ class App {
     this.btnWelcomeSkip = document.getElementById('btn-welcome-skip');
 
     this.btnToSettings = document.getElementById('btn-to-settings');
+    this.btnManualSync = document.getElementById('btn-manual-sync');
     this.childFamilyLabel = document.getElementById('child-family-label');
     this.childSyncDot = document.getElementById('child-sync-dot');
     this.actionButtonsGrid = document.getElementById('action-buttons-grid');
@@ -745,6 +746,21 @@ class App {
 
     this.btnToSettings.addEventListener('click', () => this.showSettingsView());
     this.btnBackToChild.addEventListener('click', () => this.showChildView());
+
+    // 手動更新ボタン
+    if (this.btnManualSync) {
+      this.btnManualSync.addEventListener('click', () => {
+        sound.playTap();
+        this.btnManualSync.classList.add('spinning');
+        setTimeout(() => this.btnManualSync.classList.remove('spinning'), 600);
+
+        const code = store.getPasscode();
+        if (code) {
+          store.pollCloud(store.toTopic(code), false);
+        }
+        this.render();
+      });
+    }
 
     this.btnSavePasscode.addEventListener('click', () => {
       const code = this.inputSettingsPasscode.value.trim();
