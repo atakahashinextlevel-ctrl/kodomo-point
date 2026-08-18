@@ -295,11 +295,10 @@ body {
    子ども画面：行動ボタン カードグリッド
    ========================================= */
 .action-buttons-section {
-  flex: 1;
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
 }
 
 .action-buttons-grid {
@@ -446,11 +445,12 @@ body {
   box-sizing: border-box;
 }
 
-/* 1つ戻すボタン */
+/* 1つ戻すボタン（一番下の段から少し空けて直下に配置） */
 .child-footer {
   display: flex;
   justify-content: center;
-  padding-top: 8px;
+  margin-top: 10px;
+  padding-bottom: 24px;
 }
 
 .undo-btn {
