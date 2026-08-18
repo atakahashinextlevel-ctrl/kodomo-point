@@ -1,0 +1,16 @@
+{
+  "name": "こどもポイント",
+  "short_name": "こどもポイント",
+  "description": "子ども向けのがんばりポイントWebアプリ",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#FFFDF0",
+  "theme_color": "#FF8E3C",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⭐</text></svg>",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}

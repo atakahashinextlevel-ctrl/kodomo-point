@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#FF8E3C">
+  <title>こどもポイント</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="style.css">
+  <!-- Firebase SDK (CDN) -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+</head>
+<body>
+  <div id="app" class="app-container">
+
+    <!-- ========================================= -->
+    <!-- 0. 初回あいことば入力画面 (Welcome View) -->
+    <!-- ========================================= -->
+    <section id="welcome-view" class="view welcome-view">
+      <div class="welcome-card">
+        <div class="welcome-icon">👨‍👩‍👧‍👦 🌟</div>
+        <h1 class="welcome-title">🌟ごほうびポイントアプリ🌟</h1>
+        <p class="welcome-desc">かぞくみんなで つかうために<br><strong>「かぞくのあいことば」</strong> をいれてね！</p>
+        
+        <div class="form-group welcome-input-group">
+          <label for="input-welcome-passcode">家族のあいことば：</label>
+          <input type="text" id="input-welcome-passcode" class="input-text input-large-passcode" placeholder="例: tanaka, yamada2026" maxlength="20" autocomplete="off" autocorrect="off" autocapitalize="off">
+          <span class="input-hint">※ 半角英数字やひらがなで自由に決められます</span>
+        </div>
+
+        <button type="button" id="btn-welcome-start" class="btn-welcome-start">
+          🚀 アプリをはじめる！
+        </button>
+
+        <div class="welcome-footer-links">
+          <button type="button" id="btn-welcome-skip" class="btn-link-skip">
+            まずは一人でためす（同期なし）
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========================================= -->
+    <!-- 1. 子ども用メイン画面 -->
+    <!-- ========================================= -->
+    <main id="child-view" class="view">
+      <!-- ヘッダー（タイトル＆保護者ボタン＆家族バッジ） -->
+      <header class="point-header">
+        <div class="header-top-row">
+          <div class="app-title-badge">
+            <span class="app-title-text">🌟ごほうびポイントアプリ🌟</span>
+          </div>
+          <button id="btn-to-settings" class="settings-gear-btn" title="ほごしゃ用せってい" aria-label="設定画面を開く">
+            ⚙️ ほごしゃ
+          </button>
+        </div>
+
+        <!-- 家族ステータスバー -->
+        <div class="family-status-bar" id="family-status-bar">
+          <span class="family-icon">👨‍👩‍👧</span>
+          <span class="family-name-label" id="child-family-label">あいことば: なし</span>
+          <span class="sync-dot" id="child-sync-dot" title="同期状態"></span>
+        </div>
+
+        <p class="child-sub-message">ボタンをおして ごほうびを ゲットしよう！</p>
+      </header>
+
+      <!-- 行動ボタン一覧（最大6個のカードグリッド） -->
+      <section class="action-buttons-section" aria-label="がんばったことリスト">
+        <div id="action-buttons-grid" class="action-buttons-grid">
+          <!-- JSで動的に各ボタンカードを生成 -->
+        </div>
+      </section>
+
+      <!-- フッター操作エリア（1つ戻すボタン） -->
+      <footer class="child-footer">
+        <button id="btn-undo" class="undo-btn" disabled aria-label="直前のポイント加算を1つ戻す">
+          <span class="undo-icon">↩️</span>
+          <span class="undo-text">1つもどす</span>
+        </button>
+      </footer>
+    </main>
+
+    <!-- ========================================= -->
+    <!-- 2. 保護者用設定画面 -->
+    <!-- ========================================= -->
+    <section id="settings-view" class="view">
+      <header class="settings-header">
+        <button id="btn-back-to-child" class="btn-back" aria-label="もどる">
+          ◀ こどもの画面へ
+        </button>
+        <h2>⚙️ 保護者用せってい</h2>
+      </header>
+
+      <div class="settings-content">
+        <!-- 家族共有・あいことば設定 -->
+        <section class="settings-card highlight-card">
+          <div class="card-header-flex">
+            <div>
+              <h3 class="settings-section-title">👨‍👩‍👧 家族のあいことば（同期設定）</h3>
+              <p class="settings-help-text">同じあいことばを入れたスマホ同士でリアルタイム共有されます</p>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <div class="passcode-display-row">
+              <input type="text" id="input-settings-passcode" class="input-text" placeholder="例: yamada2026" maxlength="20">
+              <button type="button" id="btn-save-passcode" class="btn-primary-small">変更</button>
+            </div>
+          </div>
+
+          <div class="share-url-box">
+            <button type="button" id="btn-copy-invite-url" class="btn-copy-url">
+              🔗 家族招待用のURLをコピー
+            </button>
+            <span class="copy-hint" id="copy-hint-text">このURLを家族のLINE等に送ると、あいことば入力なしで繋がります！</span>
+          </div>
+        </section>
+
+        <!-- 行動ボタンの管理（最大6個） -->
+        <section class="settings-card">
+          <div class="card-header-flex">
+            <div>
+              <h3 class="settings-section-title">🔘 がんばりボタン（最大6個）</h3>
+              <p class="settings-help-text">ボタンごとに獲得ポイント・目標・ご褒美を設定できます</p>
+            </div>
+            <button type="button" id="btn-add-action" class="btn-primary-small">
+              ＋ ボタン追加
+            </button>
+          </div>
+          
+          <div id="action-settings-list" class="action-settings-list">
+            <!-- JSで動的に設定項目リストを生成 -->
+          </div>
+        </section>
+
+        <!-- 一括リセット -->
+        <section class="settings-card">
+          <h3 class="settings-section-title">🔄 まとめてリセット</h3>
+          <div class="form-group reset-group">
+            <button type="button" id="btn-reset-all" class="btn-danger">
+              全ボタンのポイントを 0 にリセット
+            </button>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ========================================= -->
+    <!-- 3. ボタン編集モーダル -->
+    <!-- ========================================= -->
+    <div id="modal-edit-action" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card">
+        <h3 id="modal-title">ボタンのへんしゅう</h3>
+        
+        <div class="form-group">
+          <label for="edit-action-title">なまえ（やる行動）：</label>
+          <input type="text" id="edit-action-title" class="input-text" placeholder="例：はみがき" maxlength="12">
+        </div>
+
+        <div class="form-row-2col">
+          <div class="form-group">
+            <label>1回でもらえるpt：</label>
+            <div class="point-options" id="edit-point-options"></div>
+          </div>
+
+          <div class="form-group">
+            <label>目標ポイント：</label>
+            <div class="stepper-row-small">
+              <button type="button" class="btn-step-sm" id="btn-modal-target-minus">－</button>
+              <span class="stepper-val-sm" id="modal-target-points-val">5</span>
+              <button type="button" class="btn-step-sm" id="btn-modal-target-plus">＋</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="edit-action-reward">達成したときのごほうび：</label>
+          <input type="text" id="edit-action-reward" class="input-text" placeholder="例：すきなシール、アイス" maxlength="25">
+        </div>
+
+        <div class="form-group">
+          <label>現在のポイント調整：</label>
+          <div class="stepper-row-small">
+            <button type="button" class="btn-step-sm" id="btn-modal-current-minus">－</button>
+            <span class="stepper-val-sm current-val-highlight" id="modal-current-points-val">0</span>
+            <button type="button" class="btn-step-sm" id="btn-modal-current-plus">＋</button>
+            <button type="button" class="btn-step-reset" id="btn-modal-current-reset">0にリセット</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>絵文字（アイコン）：</label>
+          <div class="emoji-picker-container">
+            <input type="text" id="edit-action-emoji" class="input-emoji" maxlength="2" readonly>
+            <div class="preset-emojis" id="preset-emojis-list"></div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>ボタンの色：</label>
+          <div class="color-picker-palette" id="color-palette-list"></div>
+        </div>
+
+        <!-- プレビュー -->
+        <div class="preview-box">
+          <span class="preview-label">ボタンの見た目プレビュー:</span>
+          <div id="action-preview-card" class="action-btn-preview-card">
+            <div class="preview-top">
+              <span class="action-emoji" id="preview-emoji">🦷</span>
+              <span class="action-title" id="preview-title">はみがき</span>
+              <span class="action-pts-tag" id="preview-pts">+1 pt</span>
+            </div>
+            <div class="preview-progress">
+              <span class="preview-pts-text" id="preview-prog-text">⭐ 0 / 5</span>
+              <div class="preview-bar"><div class="preview-bar-fill" id="preview-bar-fill"></div></div>
+            </div>
+            <div class="preview-reward" id="preview-reward-text">🎁 ごほうび: すきなシール</div>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" id="btn-cancel-edit" class="btn-secondary">キャンセル</button>
+          <button type="button" id="btn-save-edit" class="btn-primary">ほぞんする</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========================================= -->
+    <!-- 4. 達成お祝いモーダル -->
+    <!-- ========================================= -->
+    <div id="modal-celebration" class="modal-celebration" aria-hidden="true">
+      <canvas id="confetti-canvas"></canvas>
+      <div class="celebration-content">
+        <div class="celebration-badge-bounce">🎉 👑 🎊</div>
+        <h1 class="celebration-title">やったね！！</h1>
+        <p class="celebration-subtitle" id="celebration-action-title">「はみがき」もくひょうたっせい！</p>
+        
+        <div class="celebration-reward-box">
+          <span class="reward-title-small">もらえるごほうび</span>
+          <div class="reward-name-large" id="celebration-reward-name">すきなシール</div>
+        </div>
+
+        <div class="celebration-points-summary" id="celebration-points-summary">
+          ⭐ 5 / 5 ポイント達成！
+        </div>
+
+        <button type="button" id="btn-close-celebration" class="btn-celebration-close">
+          おめでとう！
+        </button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- 統合スクリプト -->
+  <script src="js/app.bundle.js"></script>
+</body>
+</html>
