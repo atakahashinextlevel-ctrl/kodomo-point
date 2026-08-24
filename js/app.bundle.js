@@ -1,5 +1,5 @@
 /**
- * app.bundle.js - 超堅牢ハイブリッド同期エンジン (WebSocket + 定期ポーリング + キャッシュ同期)
+ * app.bundle.js - 永続クラウドデータベース ＆ 超高速リアルタイム同期エンジン
  */
 
 // =========================================
@@ -230,10 +230,10 @@ class ConfettiEngine {
 const confetti = new ConfettiEngine('confetti-canvas');
 
 // =========================================
-// 3. ハイブリッド同期ストア (WebSocket + Polling + LocalStorage)
+// 3. 永続クラウドデータベース ＆ ハイブリッド同期ストア
 // =========================================
-const STORAGE_KEY_DATA = 'kodomo_point_state_v5';
-const STORAGE_KEY_PASSCODE = 'kodomo_point_passcode_v5';
+const STORAGE_KEY_DATA = 'kodomo_point_state_v6';
+const STORAGE_KEY_PASSCODE = 'kodomo_point_passcode_v6';
 
 const DEFAULT_ACTIONS = [
   {
@@ -268,20 +268,20 @@ const DEFAULT_ACTIONS = [
   }
 ];
 
-class HybridRealtimeStore {
+class PersistentCloudStore {
   constructor() {
     this.clientId = 'cid_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
     this.passcode = localStorage.getItem(STORAGE_KEY_PASSCODE) || '';
     this.state = this.loadLocal();
     this.listeners = [];
     this.ws = null;
-    this.isCloudSyncing = false;
-    this.lastUpdatedAt = Number(localStorage.getItem('kodomo_point_last_updated') || 0);
+    this.isCloudConnected = false;
+    this.lastUpdatedAt = Number(localStorage.getItem('kodomo_point_last_updated_v6') || 0);
     this.pollInterval = null;
 
     // タブ間同期
     try {
-      this.channel = new BroadcastChannel('kodomo_pt_channel_v5');
+      this.channel = new BroadcastChannel('kodomo_pt_channel_v6');
       this.channel.onmessage = (e) => {
         if (e.data && e.data.from !== this.clientId && e.data.passcode === this.passcode) {
           this.applyExternal(e.data.state, e.data.updatedAt, true);
@@ -294,8 +294,8 @@ class HybridRealtimeStore {
     }
   }
 
-  // 安全なトピック文字列の生成
-  toTopic(passcode) {
+  // 安全なキー名の生成（ハッシュ＋サニタイズ）
+  getStorageKey(passcode) {
     const raw = (passcode || '').trim().toLowerCase();
     let hash = 5381;
     for (let i = 0; i < raw.length; i++) {
@@ -303,7 +303,7 @@ class HybridRealtimeStore {
       hash = hash & hash;
     }
     const clean = encodeURIComponent(raw).replace(/[^a-zA-Z0-9]/g, '');
-    return `kpoint_${clean}_${Math.abs(hash)}`;
+    return `kpoint_v6_${clean}_${Math.abs(hash)}`;
   }
 
   loadLocal() {
@@ -337,8 +337,8 @@ class HybridRealtimeStore {
     return this.passcode;
   }
 
-  // 同期プロトコルの開始
-  startSync(passcode) {
+  // 同期プロトコルの開始（永続DBフェッチ ＋ リアルタイムWS接続）
+  async startSync(passcode) {
     if (this.ws) {
       try { this.ws.close(); } catch (e) {}
       this.ws = null;
@@ -349,26 +349,72 @@ class HybridRealtimeStore {
     }
 
     if (!passcode) {
-      this.isCloudSyncing = false;
+      this.isCloudConnected = false;
       this.notify();
       return;
     }
 
-    const topic = this.toTopic(passcode);
+    const key = this.getStorageKey(passcode);
 
-    // 1. 初回クラウド状態フェッチ
-    this.pollCloud(topic, true);
+    // 1. 永続クラウドストレージからデータを確実に復元
+    await this.fetchFromPersistentDB(key);
 
-    // 2. 定期ポーリング（3秒おき：WebSocketが途切れても確実に同期）
+    // 2. 定期バックグラウンド同期（5秒おき）
     this.pollInterval = setInterval(() => {
-      this.pollCloud(topic, false);
-    }, 3000);
+      this.fetchFromPersistentDB(key);
+    }, 5000);
 
-    // 3. WebSocket接続（0.1秒リアルタイム通知）
+    // 3. リアルタイム通信（0.1秒即時通知）
+    this.connectWebSocket(key);
+  }
+
+  // 永続クラウドデータベース（KV/REST）からの取得
+  async fetchFromPersistentDB(key) {
     try {
-      this.ws = new WebSocket(`wss://ntfy.sh/${topic}/ws`);
+      // 永続クラウドKVエンドポイント
+      const res = await fetch(`https://kvdb.io/B1bkW8C3s4E5n2M1z8x9pQ/${key}?t=${Date.now()}`);
+      if (res.ok) {
+        const cloudData = await res.json();
+        if (cloudData && Array.isArray(cloudData.actions) && cloudData.updatedAt > this.lastUpdatedAt) {
+          this.applyExternal(cloudData, cloudData.updatedAt, false);
+        }
+        this.isCloudConnected = true;
+      } else if (res.status === 404) {
+        // クラウドにまだデータがない場合は、この端末のデータを初回登録
+        this.saveToPersistentDB(key);
+        this.isCloudConnected = true;
+      }
+    } catch (e) {
+      // ネットワーク一時エラー
+    }
+    this.notify();
+  }
+
+  // 永続クラウドデータベースへの書き込み
+  async saveToPersistentDB(key) {
+    const payload = {
+      actions: this.state.actions,
+      history: this.state.history,
+      updatedAt: this.lastUpdatedAt,
+      passcode: this.passcode
+    };
+
+    try {
+      await fetch(`https://kvdb.io/B1bkW8C3s4E5n2M1z8x9pQ/${key}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      this.isCloudConnected = true;
+    } catch (e) {}
+  }
+
+  // リアルタイムWebSocket接続
+  connectWebSocket(key) {
+    try {
+      this.ws = new WebSocket(`wss://ntfy.sh/${key}/ws`);
       this.ws.onopen = () => {
-        this.isCloudSyncing = true;
+        this.isCloudConnected = true;
         this.notify();
       };
       this.ws.onmessage = (event) => {
@@ -383,54 +429,11 @@ class HybridRealtimeStore {
         } catch (e) {}
       };
       this.ws.onclose = () => {
-        this.isCloudSyncing = false;
-        this.notify();
+        setTimeout(() => {
+          if (this.passcode) this.connectWebSocket(key);
+        }, 4000);
       };
-      this.ws.onerror = () => {
-        this.isCloudSyncing = false;
-        this.notify();
-      };
-    } catch (e) {
-      console.warn('WS error:', e);
-    }
-  }
-
-  // クラウドからのポーリング取得
-  async pollCloud(topic, isInitial = false) {
-    try {
-      const url = `https://ntfy.sh/${topic}/json?poll=1&since=24h`;
-      const res = await fetch(url);
-      if (res.ok) {
-        this.isCloudSyncing = true;
-        const text = await res.text();
-        const lines = text.trim().split('\n');
-        let latest = null;
-
-        for (let i = lines.length - 1; i >= 0; i--) {
-          if (!lines[i]) continue;
-          try {
-            const item = JSON.parse(lines[i]);
-            if (item && item.message) {
-              const p = JSON.parse(item.message);
-              if (p && p.type === 'SYNC' && (!latest || p.updatedAt > latest.updatedAt)) {
-                latest = p;
-              }
-            }
-          } catch (err) {}
-        }
-
-        if (latest && latest.updatedAt > this.lastUpdatedAt) {
-          this.applyExternal(latest.state, latest.updatedAt, !isInitial);
-        } else if (isInitial && !latest) {
-          // クラウドにデータがまだ存在しない場合、自分の端末のデータをクラウドの初期データとして登録
-          this.broadcast(true);
-        }
-      }
-    } catch (e) {
-      // オフラインまたはエラー
-      this.isCloudSyncing = false;
-    }
-    this.notify();
+    } catch (e) {}
   }
 
   applyExternal(newState, updatedAt, playEffect = true) {
@@ -445,7 +448,7 @@ class HybridRealtimeStore {
 
     try {
       localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(this.state));
-      localStorage.setItem('kodomo_point_last_updated', String(this.lastUpdatedAt));
+      localStorage.setItem('kodomo_point_last_updated_v6', String(this.lastUpdatedAt));
     } catch (e) {}
 
     if (playEffect) {
@@ -458,38 +461,35 @@ class HybridRealtimeStore {
     this.lastUpdatedAt = Date.now();
     try {
       localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(this.state));
-      localStorage.setItem('kodomo_point_last_updated', String(this.lastUpdatedAt));
+      localStorage.setItem('kodomo_point_last_updated_v6', String(this.lastUpdatedAt));
     } catch (e) {}
 
-    this.broadcast();
-    this.notify();
-  }
-
-  // クラウドと他タブへデータ送信
-  broadcast(isInitial = false) {
-    const payload = {
-      type: 'SYNC',
-      from: this.clientId,
-      passcode: this.passcode,
-      updatedAt: this.lastUpdatedAt,
-      isInitial: isInitial,
-      state: this.state
-    };
-
-    // タブ間
-    if (this.channel) {
-      try { this.channel.postMessage(payload); } catch (e) {}
-    }
-
-    // クラウド送信
     if (this.passcode) {
-      const topic = this.toTopic(this.passcode);
-      fetch(`https://ntfy.sh/${topic}`, {
+      const key = this.getStorageKey(this.passcode);
+      // 1. 永続クラウドストレージに保存
+      this.saveToPersistentDB(key);
+
+      // 2. リアルタイム中継（即時ブロードキャスト）
+      const payload = {
+        type: 'SYNC',
+        from: this.clientId,
+        passcode: this.passcode,
+        updatedAt: this.lastUpdatedAt,
+        state: this.state
+      };
+
+      if (this.channel) {
+        try { this.channel.postMessage(payload); } catch (e) {}
+      }
+
+      fetch(`https://ntfy.sh/${key}`, {
         method: 'POST',
         headers: { 'Title': 'Sync', 'Priority': '1' },
         body: JSON.stringify(payload)
       }).catch(() => {});
     }
+
+    this.notify();
   }
 
   subscribe(fn) {
@@ -597,7 +597,7 @@ class HybridRealtimeStore {
   }
 }
 
-const store = new HybridRealtimeStore();
+const store = new PersistentCloudStore();
 
 // =========================================
 // 4. メインUIコントローラー
@@ -656,7 +656,6 @@ class App {
     this.btnWelcomeSkip = document.getElementById('btn-welcome-skip');
 
     this.btnToSettings = document.getElementById('btn-to-settings');
-    this.btnManualSync = document.getElementById('btn-manual-sync');
     this.childFamilyLabel = document.getElementById('child-family-label');
     this.childSyncDot = document.getElementById('child-sync-dot');
     this.actionButtonsGrid = document.getElementById('action-buttons-grid');
@@ -746,21 +745,6 @@ class App {
 
     this.btnToSettings.addEventListener('click', () => this.showSettingsView());
     this.btnBackToChild.addEventListener('click', () => this.showChildView());
-
-    // 手動更新ボタン
-    if (this.btnManualSync) {
-      this.btnManualSync.addEventListener('click', () => {
-        sound.playTap();
-        this.btnManualSync.classList.add('spinning');
-        setTimeout(() => this.btnManualSync.classList.remove('spinning'), 600);
-
-        const code = store.getPasscode();
-        if (code) {
-          store.pollCloud(store.toTopic(code), false);
-        }
-        this.render();
-      });
-    }
 
     this.btnSavePasscode.addEventListener('click', () => {
       const code = this.inputSettingsPasscode.value.trim();
@@ -892,12 +876,12 @@ class App {
 
     if (passcode) {
       this.childFamilyLabel.textContent = `あいことば: ${passcode}`;
-      if (store.isCloudSyncing) {
+      if (store.isCloudConnected) {
         this.childSyncDot.className = 'sync-dot connected';
-        this.childSyncDot.title = '家族とリアルタイム同期中（クラウド接続済）';
+        this.childSyncDot.title = '家族とリアルタイム同期中（永続クラウド接続済）';
       } else {
         this.childSyncDot.className = 'sync-dot';
-        this.childSyncDot.title = 'クラウド接続待機中...';
+        this.childSyncDot.title = 'クラウド接続確認中...';
       }
     } else {
       this.childFamilyLabel.textContent = '同期なし（一人で利用中）';
